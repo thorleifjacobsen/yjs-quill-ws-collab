@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <!-- Include Quill's default "snow" theme -->
+    <link
+      href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css"
+      rel="stylesheet"
+    />
+    <meta charset="UTF-8" />
+    <title>Collaborative Quill Editor with Yjs + WebSocket</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+      }
+      #editor1 {
+        height: 200px;
+      }
+      textarea {
+        font-family: monospace;
+      }
+      .ql-cursor-flag {
+        /* Hack to always show cursor flags */
+        opacity: 1 !important;
+        visibility: visible !important;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Yjs + WebSocket + Quill (with Awareness)</h1>
+
+    <!-- Nickname display -->
+    <p><b>Nickname:</b> <span id="nickname"></span></p>
+
+    <!-- Quill editor (with awareness & cursors) -->
+    <h3>Collaborative Quill Editor</h3>
+    <div id="editor1"></div>
+
+    <hr />
+
+    <!-- Simple plain text editor (no awareness, for demo) -->
+    <h3>Plain Text Sync Example</h3>
+    <textarea id="editor2" cols="60" rows="10"></textarea>
+
+    <!-- Main collaborative logic -->
+    <script type="module">
+      /* ---------------------------------------------------------------------
+         1. Import dependencies from ESM
+      --------------------------------------------------------------------- */
+      import * as Y from "https://esm.sh/yjs@latest";
+      import Quill from "https://esm.sh/quill@latest";
+      import QuillCursors from "https://esm.sh/quill-cursors@latest";
+      import { QuillBinding } from "https://esm.sh/y-quill@latest";
+      import * as encoding from "https://esm.sh/lib0/encoding";
+      import * as decoding from "https://esm.sh/lib0/decoding";
+      import * as awarenessProtocol from "https://esm.sh/y-protocols/awareness.js";
+
+      /* ---------------------------------------------------------------------
+         2. Initialize Quill with toolbar + cursors (for live awareness)
+      --------------------------------------------------------------------- */
+      Quill.register("modules/cursors", QuillCursors);
+
+      const quill = new Quill("#editor1", {
+        modules: {
+          cursors: true,
+          toolbar: [
+            [{ header: [1, 2, false] }],
+            ["bold", "italic", "underline"],
+            ["image", "code-block"],
+          ],
+        },
+        theme: "snow",
+        placeholder: "Start typing here...",
+      });
+
+      /* ---------------------------------------------------------------------
+         3. Create a random nickname + color for this user
+      --------------------------------------------------------------------- */
+      const nickname = "User-" + Math.floor(Math.random() * 10000);
+      const color = "#" + Math.floor(Math.random() * 0xffffff).toString(16);
+      document.getElementById("nickname").textContent = nickname;
+
+      /* ---------------------------------------------------------------------
+         4. Create a shared Yjs document
+         Each Y.Doc represents shared state synced among peers.
+      --------------------------------------------------------------------- */
+      const ydoc = new Y.Doc();
+
+      // Two shared text types: one bound to Quill, one to <textarea>
+      const ytext1 = ydoc.getText("quill-doc");
+      const ytext2 = ydoc.getText("plaintext-doc");
+
+      /* ---------------------------------------------------------------------
+         5. Bind Y.Text ↔ Quill editor using y-quill
+      --------------------------------------------------------------------- */
+      new QuillBinding(ytext1, quill);
+
+      /* ---------------------------------------------------------------------
+         6. Awareness: shows presence, cursors, and names of collaborators
+      --------------------------------------------------------------------- */
+      const awareness = new awarenessProtocol.Awareness(ydoc);
+
+      // Each client exposes local awareness data (name + color)
+      awareness.setLocalStateField("user", {
+        name: nickname,
+        color: color,
+      });
+
+      // Get the Quill cursor manager
+      const cursors = quill.getModule("cursors");
+
+      // When awareness updates (new users, moved cursors, disconnects)
+      awareness.on("update", ({ added, updated, removed }) => {
+        const states = awareness.getStates();
+        cursors.clearCursors();
+
+        // Draw cursors for all other connected users
+        states.forEach((state, clientId) => {
+          if (!state.user || clientId === awareness.clientID) return;
+          const color = state.user.color || "#ccc";
+          cursors.createCursor(clientId, state.user.name, color);
+          if (state.selection) cursors.moveCursor(clientId, state.selection);
+        });
+      });
+
+      // Update awareness when local user changes selection
+      quill.on("selection-change", (range) => {
+        awareness.setLocalStateField("selection", range);
+      });
+
+      /* ---------------------------------------------------------------------
+         7. Plaintext editor (non-Quill)
+         Demonstrates Y.Text <-> textarea binding manually
+      --------------------------------------------------------------------- */
+      const editor2 = document.getElementById("editor2");
+
+      // Reflect Yjs changes into the textarea
+      ytext2.observe(() => {
+        const val = ytext2.toString();
+        if (editor2.value !== val) editor2.value = val;
+      });
+
+      // Apply local input back into Yjs
+      editor2.oninput = () => {
+        ydoc.transact(() => {
+          ytext2.delete(0, ytext2.length);
+          ytext2.insert(0, editor2.value);
+        });
+      };
+
+      /* ---------------------------------------------------------------------
+         8. WebSocket connection (custom Yjs protocol)
+      --------------------------------------------------------------------- */
+      const ws = new WebSocket(`ws://${location.host}`);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        console.log("✅ Connected to server");
+
+        // Send the current full Y.Doc state to the server
+        const update = Y.encodeStateAsUpdate(ydoc);
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, 0); // type 0 = Yjs document update
+        encoding.writeVarUint8Array(enc, update);
+        ws.send(encoding.toUint8Array(enc));
+      };
+
+      // Handle messages from server
+      ws.onmessage = (e) => {
+        if (typeof e.data === "string") return; // ignore text
+        const data = new Uint8Array(e.data);
+        const dec = decoding.createDecoder(data);
+        const messageType = decoding.readVarUint(dec);
+
+        if (messageType === 0) {
+          // Document update
+          const update = decoding.readVarUint8Array(dec);
+          Y.applyUpdate(ydoc, update, ws);
+        } else if (messageType === 1) {
+          // Awareness update
+          const update = decoding.readVarUint8Array(dec);
+          awarenessProtocol.applyAwarenessUpdate(awareness, update, ws);
+        }
+      };
+
+      ws.onclose = () => {
+        console.warn("Connection lost. Reconnecting...");
+        setTimeout(() => location.reload(), 1000);
+      };
+
+      /* ---------------------------------------------------------------------
+         9. Outgoing updates
+         Send local Yjs or awareness changes to the server
+      --------------------------------------------------------------------- */
+
+      // When the local document changes, send a Yjs update
+      ydoc.on("update", (update, origin) => {
+        if (origin === ws || ws.readyState !== WebSocket.OPEN) return;
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, 0);
+        encoding.writeVarUint8Array(enc, update);
+        ws.send(encoding.toUint8Array(enc));
+      });
+
+      // When local awareness changes, send to server
+      awareness.on("update", ({ added, updated, removed }, origin) => {
+        if (origin === ws) return; // prevent echo loops
+        const changed = added.concat(updated, removed);
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, 1); // type 1 = awareness
+        encoding.writeVarUint8Array(
+          enc,
+          awarenessProtocol.encodeAwarenessUpdate(awareness, changed)
+        );
+        ws.send(encoding.toUint8Array(enc));
+      });
+    </script>
+  </body>
+</html>

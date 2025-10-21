@@ -90,13 +90,23 @@ wss.on("connection", (ws) => {
   );
 
   /* -------------------------------------------------------------------
-     4. Send the full document state to the new client
+     4. Send the full document and awareness state to the new client
      ------------------------------------------------------------------- */
   const fullState = Y.encodeStateAsUpdate(ydoc);
   const enc = encoding.createEncoder();
   encoding.writeVarUint(enc, 0); // message type 0 = Yjs document update
   encoding.writeVarUint8Array(enc, fullState);
   ws.send(encoding.toUint8Array(enc), { binary: true });
+
+  // Send awareness states of all users to the new client
+  const awarenessStates = awarenessProtocol.encodeAwarenessUpdate(
+    awareness,
+    Array.from(awareness.getStates().keys())
+  );
+  const awarenessEnc = encoding.createEncoder();
+  encoding.writeVarUint(awarenessEnc, 1); // message type 1 = awareness update
+  encoding.writeVarUint8Array(awarenessEnc, awarenessStates);
+  ws.send(encoding.toUint8Array(awarenessEnc), { binary: true });
 
   /* -------------------------------------------------------------------
      5. Handle incoming messages from this client
