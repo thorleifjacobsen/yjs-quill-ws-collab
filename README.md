@@ -12,6 +12,12 @@ This setup works without `y-websocket` or third-party providers — the sync pro
 
 ---
 
+## 🤖 AI-Generated Content Disclaimer
+
+> This README, some code, formatting and cleanup were generated or refined using AI. All application logic, architectural design, and functional code were manually created, reviewed, and tested by a human author.
+
+---
+
 ## 🚀 Features
 
 ✅ Real-time collaborative editing  
